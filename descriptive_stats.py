@@ -16,6 +16,23 @@ CBC_DEMO_DENTAL_FILES = {
     "2017-2018": ("CBC_J.xpt", "DEMO_J.xpt", "OHXDEN_J.xpt"),
 }
 
+# Mapping of NHANES cycle to the XPT file that contains blood mercury
+# measurements. These filenames mirror the ones used in ``download.py`` so
+# that the datasets downloaded there can be reused here for computing
+# summary statistics.
+MERCURY_FILES = {
+    "1999-2000": "LAB06HM.xpt",
+    "2001-2002": "L06_2_B.xpt",
+    "2003-2004": "L06BMT_C.xpt",
+    "2005-2006": "PbCd_D.xpt",
+    "2007-2008": "PbCd_E.xpt",
+    "2009-2010": "PbCd_F.xpt",
+    "2011-2012": "PbCd_G.xpt",
+    "2013-2014": "PBCD_H.xpt",
+    "2015-2016": "PBCD_I.xpt",
+    "2017-2018": "PBCD_J.xpt",
+}
+
 
 def count_amalgam_surfaces(df: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c in df.columns if c.startswith("OHX") and c.endswith(("TC", "FS", "FT"))]
@@ -95,9 +112,73 @@ def categorize_amalgam(surfaces: float):
     return "High"
 
 
+def mercury_stats(data_dir: str = "nhanes_data") -> pd.DataFrame:
+    """Compute survey weighted summary statistics for blood mercury levels.
+
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing the downloaded NHANES XPT files.
+
+    Returns
+    -------
+    pd.DataFrame
+        Summary statistics with one row per NHANES cycle.
+    """
+
+    summaries = []
+    for cycle, merc_file in MERCURY_FILES.items():
+        try:
+            mercury = pyreadstat.read_xport(os.path.join(data_dir, merc_file))[0]
+            demo_file = CBC_DEMO_DENTAL_FILES[cycle][1]
+            demo = pyreadstat.read_xport(os.path.join(data_dir, demo_file))[0]
+
+            # Identify the column containing blood mercury measurement.
+            mercury_col = None
+            for col in ["LBXTHG", "LBXHGM", "LBXHG"]:
+                if col in mercury.columns:
+                    mercury_col = col
+                    break
+            if mercury_col is None:
+                # Fallback: pick first column containing 'HG'
+                for col in mercury.columns:
+                    if "HG" in col.upper():
+                        mercury_col = col
+                        break
+            if mercury_col is None:
+                print(f"No mercury column found for {cycle}")
+                continue
+
+            df = demo[["SEQN", "WTMEC2YR"]].merge(
+                mercury[["SEQN", mercury_col]], on="SEQN", how="inner"
+            )
+            sub = df[[mercury_col, "WTMEC2YR"]].dropna()
+            if sub.empty:
+                continue
+            m, sd, lo, hi = weighted_stats(sub[mercury_col], sub["WTMEC2YR"])
+            summaries.append(
+                {
+                    "Cycle": cycle,
+                    "Mean": m,
+                    "SD": sd,
+                    "CI_Low": lo,
+                    "CI_High": hi,
+                    "Sample Size": len(sub),
+                }
+            )
+        except Exception as exc:
+            print(f"Skipped {cycle}: {exc}")
+
+    return pd.DataFrame(summaries)
+
+
 if __name__ == "__main__":
     combined_df, summary_df = process_cycles()
     # Save full combined dataset and summary statistics to CSV files
     combined_df.to_csv("combined_dataset.csv", index=False)
     summary_df.to_csv("summary_statistics.csv", index=False)
     print(summary_df.head())
+
+    mercury_df = mercury_stats()
+    mercury_df.to_csv("mercury_statistics.csv", index=False)
+    print(mercury_df.head())
